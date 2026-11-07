@@ -6,7 +6,7 @@ export function makeHost(options = {}) {
   const {
     platform = "darwin",
     arch = "arm64",
-    dir = "/tmp/mygo-lyrics-plugin",
+    dir = "/tmp/mygo-local-lyrics",
     dataDir = "/tmp/mygo-music/plugin-data/lrclib-lyrics",
     settings = {},
     storage = {},
@@ -15,9 +15,11 @@ export function makeHost(options = {}) {
     responses = [],
     spawnError = null,
     catalogFails = 0,
+    noTranslation = false,
+    defaultsFail = false,
   } = options;
 
-  const calls = { fetch: [], spawn: [], storage: [], sync: [] };
+  const calls = { fetch: [], spawn: [], storage: [], sync: [], defaults: [] };
   let catalogTries = 0;
   const host = {
     platform,
@@ -25,7 +27,7 @@ export function makeHost(options = {}) {
     dir,
     dataDir,
     setting: (key) => settings[key] ?? "",
-    t: (text) => translations[text] ?? text,
+    t: noTranslation ? undefined : (text) => translations[text] ?? text,
     language: () => "en",
     storage: {
       get: (key) => {
@@ -43,8 +45,9 @@ export function makeHost(options = {}) {
     },
     spawn: (command, args = []) => {
       calls.spawn.push({ command, args });
-      if (spawnError) throw new Error(spawnError);
       const mode = args[0] === "sync" ? "sync" : args[0] === "defaults" ? "defaults" : "index";
+      if (mode === "defaults") calls.defaults.push(args);
+      if (spawnError) throw new Error(spawnError);
       let lines;
       if (mode === "sync") {
         lines = [];
@@ -59,7 +62,7 @@ export function makeHost(options = {}) {
       const written = [];
       return {
         readLine: async () => lines.shift() ?? null,
-        wait: async () => (mode === "index" && catalogTries <= catalogFails ? 1 : 0),
+        wait: async () => ((mode === "index" && catalogTries <= catalogFails) || (mode === "defaults" && defaultsFail) ? 1 : 0),
         write: (text) => written.push(text),
         closeStdin: () => {
           calls.sync.push(...written.map((x) => JSON.parse(x)));

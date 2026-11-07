@@ -38,7 +38,7 @@ MyGo Music 是插件驱动的：`loadLyrics` 只会向**当前曲目所属 sourc
 | 行为 | 实现 |
 | --- | --- |
 | 主查询 | `GET https://lrclib.net/api/get`，参数 `artist_name`、`track_name`、`album_name`、`duration` |
-| 请求标识 | `User-Agent: LRCLibLyrics/1.1.0 (…)`、`Accept: application/json` |
+| 请求标识 | `User-Agent: LRCLibLyrics/<version> (…)`、`Accept: application/json` |
 | `syncedLyrics` | 作为 `lrc` 返回（由 App 自己解析 LRC） |
 | `plainLyrics` | 作为带时间的 `lines` 返回，均匀分布在歌曲时长内（App 要求每行有时间） |
 | 缓存 | `host.storage`，按曲目 id 保存，带有效期；短歌词 24 小时后再查一次 |
@@ -60,9 +60,9 @@ MyGo Music 是插件驱动的：`loadLyrics` 只会向**当前曲目所属 sourc
 ## 默认值（不留空框）
 
 MyGo Music 的 `music.Setting` 只有 `key`、`label`、`help`、`link`，manifest
-无法声明默认值。因此安装脚本与辅助程序会在 **App 启动前**写入
-`<app data>/plugin-data/lrclib-lyrics/settings.json`，让「设置 > 插件」首次
-打开就显示真实值：
+无法声明默认值。辅助程序的 `defaults` 模式会写入
+`<app data>/plugin-data/lrclib-lyrics/settings.json`（只补缺失的 key，不覆盖
+你的修改）；如果设置框为空，`index.js` 也会在内存中回退到同样默认值：
 
 | 配置项 | 默认值 |
 | --- | --- |
@@ -75,13 +75,12 @@ MyGo Music 的 `music.Setting` 只有 `key`、`label`、`help`、`link`，manife
 | `syncIntervalMinutes` | `15` |
 
 没有 `artist`、`title`、`album` 覆盖项：元数据来自 App 的本地音乐库索引。
-若某个 key 缺失或为空，`index.js` 仍会回退到同样的默认值，老版本安装也
-能继续工作。`npm run install:local` 会用 `--force` 恢复全部默认值；发布版
-安装只补缺失的 key，不会覆盖你自己的修改。
-
-> **注意：** App 在加载插件时读取 `settings.json`。请在启动 MyGo Music
-> **之前**运行 `npm run install:local`，然后退出并重新打开 App。发布版安装
-> 也可以使用 helper 的 `defaults` 模式。
+**本地安装**时 `npm run install:local` 会在 App 启动前写好文件，并用
+`--force` 恢复全部默认值。**发布版安装**时 App 的安装器只复制文件，因此
+`account()`（以及 `played()`）会在用户于「设置 > 插件」授权程序后调用一次
+helper；失败的尝试一分钟后重试。App 在加载插件时才读取 `settings.json`，
+所以下一次启动就能在设置框里看到这些值；功能不依赖这次重启，因为空框
+本来就会使用上表的默认值。
 
 ## 从 Local Files 播放
 
@@ -136,10 +135,11 @@ App 的 `local/index.json`、写 `settings.json` 和歌曲旁的 `.lrc`。辅助
 
 ```bash
 npm run check          # 检查 index.js 与 sync-lrc.mjs 语法
-npm test               # 24 个离线单测（模拟 host / LRCLib）
+npm test               # 28 个离线单测（模拟 host / LRCLib）
 npm run go:test        # 辅助程序 Go 单测（默认值、.lrc、文件名）
 npm run build:helpers  # 交叉编译 bin/read-index-*（6 平台）
 npm run pack           # 生成 dist/*.zip，保留可执行位
+npm run release        # 发布 v<version>，带全部 zip 资产
 npm run install:local  # 复制到 App 插件目录 + 写入默认配置
 npm run verify:app     # 在 MyGo Music 真实 JS 运行时里加载插件
 ```
@@ -164,6 +164,9 @@ npm run verify:app     # 在 MyGo Music 真实 JS 运行时里加载插件
 
 ## 发布
 
+安装按钮：
+[![在 MyGo Music 中安装](https://img.shields.io/badge/MyGo%20Music-Install-blue)](mygo-music://install-plugin?repo=AdkinsHan/mygo-local-lyrics)
+
 按 [Publishing a plugin](https://github.com/egoist/mygo-music#publishing-a-plugin)
 的说明：把 `plugin.json` 放在公开 GitHub 仓库根目录。App 会取最新 Release
 里按平台命名的 `.zip`（如 `plugin-darwin-arm64.zip`）、不带平台名的 zip，
@@ -171,13 +174,24 @@ npm run verify:app     # 在 MyGo Music 真实 JS 运行时里加载插件
 更新。每个平台 zip 只带该平台的 helper，通用 zip 带全部 6 个。
 
 ```bash
-npm run pack
-gh release create v1.1.0 dist/plugin-*.zip
+npm run build:helpers   # bin/ 已 gitignore，全新 clone 里没有辅助程序
+npm run pack            # 缺少 6 个 helper 中任何一个都会直接报错
+npm run release         # 发布 v1.1.1，带全部 7 个 zip
 ```
 
-给仓库加上 `mygo-music-plugin` topic 即可出现在插件列表页，并可使用
-`mygo-music://install-plugin?repo=owner/repo` 安装链接。插件要求 App
-**0.1.7+**：从该版本起 `process` 权限才能指定允许启动的程序。
+`npm run release` 是 `gh release create` 的薄封装，会检查 tag 与
+`plugin.json` 一致且是**小写** `v` 开头：App 只认识小写 `v` 开头的数字
+tag，无法解析的 tag 会让之后的任何 tag 都显示为「有新版本」。
+
+仓库是公开的，且已加 `mygo-music-plugin` topic，因此会出现在
+[插件列表页](https://mygo-music.egoist.dev/plugins)。安装链接为
+`mygo-music://install-plugin?repo=AdkinsHan/mygo-local-lyrics`。
+
+插件要求 App **0.1.8+**：`host.t()` 和 `locales/` 翻译是 0.1.8 才加入的
+（0.1.7 只是开始允许 `process` 权限指定程序）。0.1.8 之前的 App 会忽略
+`minAppVersion`，所以当 `host.t` 不存在时 `index.js` 会回退到英文，而不是
+直接报错。仅靠源码 zipball 无法安装（`bin/` 已 gitignore），必须发布带
+zip 资产的 Release，这也是上面一次性上传 7 个 zip 的原因。
 
 `network` 只允许 `lrclib.net`。若自定义 endpoint 指向其他域名，需要把该
 域名加入网络权限。
@@ -193,5 +207,5 @@ gh release create v1.1.0 dist/plugin-*.zip
 
 ## 许可
 
-AGPL-3.0，与 MyGo Music 一致。歌词由 [LRCLib](https://lrclib.net/) 提供，
-按其自身条款使用。
+AGPL-3.0，与 MyGo Music 一致，见 [LICENSE](LICENSE)。歌词由
+[LRCLib](https://lrclib.net/) 提供，按其自身条款使用。

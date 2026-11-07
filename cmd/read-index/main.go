@@ -132,7 +132,9 @@ type sidecar struct {
 // itself also falls back to these when a key is missing or blank.
 var libraryDefault string
 
-func setLibraryDefault(path string) { libraryDefault = filepath.ToSlash(path) }
+// The plugin passes a path it built from host.dataDir, which can contain "..".
+// Clean it so the Settings box shows a real absolute path, not a chain of them.
+func setLibraryDefault(path string) { libraryDefault = filepath.ToSlash(filepath.Clean(path)) }
 
 func defaultSettings() map[string]string {
 	return map[string]string{

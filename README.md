@@ -40,7 +40,7 @@ plugin does two things:
 | Behaviour | Implementation |
 | --- | --- |
 | Primary lookup | `GET https://lrclib.net/api/get` with `artist_name`, `track_name`, `album_name` and `duration` |
-| Identification | `User-Agent: LRCLibLyrics/1.1.0 (…)`, `Accept: application/json` |
+| Identification | `User-Agent: LRCLibLyrics/<version> (…)`, `Accept: application/json` |
 | `syncedLyrics` | returned as `lrc` (the app parses LRC itself) |
 | `plainLyrics` | returned as timed `lines`, spread over the song (the app needs a time per line) |
 | Caching | `host.storage` keyed by track id, with a TTL and a 24 h second look for short results |
@@ -66,9 +66,10 @@ Matching and reliability details:
 ## Default values (no blank boxes)
 
 MyGo Music's `music.Setting` has only `key`, `label`, `help` and `link`: a
-manifest cannot declare a default. The installer and helper therefore write
-`<app data>/plugin-data/lrclib-lyrics/settings.json` **before the app starts**,
-so Settings > Plugins shows real values on first install:
+manifest cannot declare a default. The helper's `defaults` mode writes
+`<app data>/plugin-data/lrclib-lyrics/settings.json` (only keys that are
+absent, so your edits are kept), and `index.js` falls back to the same values
+in memory when a box is blank:
 
 | key | default |
 | --- | --- |
@@ -81,14 +82,14 @@ so Settings > Plugins shows real values on first install:
 | `syncIntervalMinutes` | `15` |
 
 There is no `artist`, `title` or `album` override: metadata comes from the
-app's local library index. `index.js` falls back to the same defaults if a key
-is missing or blank, so an old install keeps working. `npm run install:local`
-restores all defaults with `--force`; a published install only fills keys that
-are absent, so your own edits are never overwritten.
-
-> **Note:** the App reads `settings.json` when it loads a plugin. Run
-> `npm run install:local` **before** starting MyGo Music, then quit and reopen
-> the app. The `defaults` helper mode is available for a published install too.
+app's local library index. For a **local install**, `npm run install:local`
+writes the file before the app starts and restores all defaults with `--force`.
+For a **published install** the app's installer only copies files, so `account()`
+(and `played()`) call the helper once the listener has allowed programs in
+Settings > Plugins; a failed attempt is retried a minute later. The app reads
+`settings.json` when it loads a plugin, so the boxes show these values from the
+next start — functionality never waits for that, because blank boxes already
+use the defaults above.
 
 ## Playing from Local Files
 
@@ -146,10 +147,11 @@ test). No `npm install` — tests use Node's built-in runner.
 
 ```bash
 npm run check          # syntax of index.js and sync-lrc.mjs
-npm test               # 24 offline unit tests with a mock host / mock LRCLib
+npm test               # 28 offline unit tests with a mock host / mock LRCLib
 npm run go:test        # helper's Go tests (defaults, sidecars, filenames)
 npm run build:helpers  # cross-compile bin/read-index-* (6 platforms)
 npm run pack           # dist/*.zip, with executable bits preserved
+npm run release        # publish v<version> with all the zip assets
 npm run install:local  # copy into the app's plugins dir + write defaults
 npm run verify:app     # load the plugin in MyGo Music's real JS runtime
 ```
@@ -176,6 +178,9 @@ proxy cache) is used; ordinary networks need none of this.
 
 ## Publishing
 
+Install button:
+[![Install in MyGo Music](https://img.shields.io/badge/MyGo%20Music-Install-blue)](mygo-music://install-plugin?repo=AdkinsHan/mygo-local-lyrics)
+
 As the [Publishing a plugin](https://github.com/egoist/mygo-music#publishing-a-plugin)
 section says: put `plugin.json` at the top of a public GitHub repository. The
 app takes the latest release's `.zip` asset named for a platform
@@ -185,14 +190,26 @@ Each platform zip now carries only that platform's helper; the general zip
 carries all six.
 
 ```bash
-npm run pack
-gh release create v1.1.0 dist/plugin-*.zip
+npm run build:helpers   # bin/ is gitignored; a fresh clone has none
+npm run pack            # refuses to make a zip without all six helpers
+npm run release         # v1.1.1 with all seven zip assets
 ```
 
-Add the topic `mygo-music-plugin` to be listed on the plugins page, and link to
-`mygo-music://install-plugin?repo=owner/repo`. The plugin needs App
-**0.1.7+**: 0.1.7 is when `process` permissions could name the programs a
-plugin may start.
+`npm run release` is a thin wrapper around `gh release create` which checks the
+tag matches `plugin.json` and is **lowercase** `v`: the app compares tag
+numbers only with a leading lowercase `v`, and an unparseable tag makes every
+later tag look like an update.
+
+The repository is public with the topic `mygo-music-plugin`, so it is listed on
+the [plugins page](https://mygo-music.egoist.dev/plugins). The install link is
+`mygo-music://install-plugin?repo=AdkinsHan/mygo-local-lyrics`.
+
+The plugin needs App **0.1.8+**: `host.t()` and `locales/` translations arrived
+in 0.1.8 (0.1.7 was when `process` permissions could name programs). Apps
+before 0.1.8 ignore `minAppVersion`, so `index.js` falls back to English when
+`host.t` is missing rather than failing. Installing from the source zipball
+alone cannot work — `bin/` is gitignored — so a release with the zip assets is
+required; this is why the command above publishes all seven.
 
 `network` is `["lrclib.net"]` only. A custom endpoint on another host needs
 that host added to the network permission.
@@ -209,5 +226,5 @@ that host added to the network permission.
 
 ## License
 
-AGPL-3.0, the same as MyGo Music. Lyrics are provided by
-[LRCLib](https://lrclib.net/) and are used under its own terms.
+AGPL-3.0, the same as MyGo Music; see [LICENSE](LICENSE). Lyrics are provided
+by [LRCLib](https://lrclib.net/) and are used under its own terms.

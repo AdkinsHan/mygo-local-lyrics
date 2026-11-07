@@ -338,6 +338,50 @@ test("writeLrc=false stops writing files beside songs", async () => {
   assert.deepEqual(p.calls.sync, []);
 });
 
+test("a published install gets defaults from the helper, without overwriting edits", async () => {
+  const p = await loadPlugin({ index: [trackRow()], responses: [getHit] });
+  await p.account();
+  assert.equal(p.calls.defaults.length, 1, "account() asks the helper for defaults");
+  const [mode, dataDir, library] = p.calls.defaults[0];
+  assert.equal(mode, "defaults");
+  assert.equal(dataDir, p.host.dataDir);
+  assert.match(library, /local\/index\.json$/);
+
+  // Only absent keys are filled: the helper itself is tested in Go.
+  assert.equal(p.calls.defaults[0].includes("--force"), false);
+});
+
+test("defaults are retried after a failure, but not on every call", async () => {
+  const p = await loadPlugin({ index: [trackRow()], responses: [getHit], defaultsFail: true });
+  await p.account();
+  p.played();
+  await p.account();
+  assert.equal(p.calls.defaults.length, 1, "a failed attempt waits for the retry window");
+
+  const ok = await loadPlugin({ index: [trackRow()], responses: [getHit] });
+  await ok.account();
+  ok.played();
+  await ok.account();
+  assert.equal(ok.calls.defaults.length, 1, "a successful attempt runs only once");
+});
+
+test("a helper that cannot start leaves defaults to the in-memory fallbacks", async () => {
+  const p = await loadPlugin({ index: [], spawnError: "the listener hasn't allowed programs" });
+  const account = await p.account();
+  assert.equal(account.id, "local");
+  assert.equal(p.calls.defaults.length, 1, "it did try, and will retry later");
+  assert.equal((await p.home()).sections[0].tracks.length, 0);
+});
+
+test("an app without host.t shows English instead of crashing", async () => {
+  const p = await loadPlugin({ index: [trackRow()], responses: [getHit], noTranslation: true });
+  assert.equal((await p.account()).name, "Your Library");
+  const home = await p.home();
+  assert.equal(home.title, "Your Library");
+  assert.equal(home.sections[0].title, "All Songs");
+  await assert.rejects(p.browse({ page: "nope" }), (e) => e.code === "unavailable");
+});
+
 test("the manifest has only the settings the listener needs", async () => {
   const fs = await import("node:fs/promises");
   const manifest = JSON.parse(await fs.readFile("plugin.json", "utf8"));

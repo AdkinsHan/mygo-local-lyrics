@@ -11,7 +11,7 @@
 // beside the file by our helper: that is what makes them show while the
 // listener plays from Local Files, where the app never asks this plugin.
 
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 const DEFAULT_ENDPOINT = "https://lrclib.net";
 const USER_AGENT = `LRCLibLyrics/${VERSION} (https://github.com/egoist/mygo-music)`;
 
@@ -39,8 +39,12 @@ const SHORT_RECHECK_MS = 24 * 60 * 60 * 1000;
 const SEARCH_PAGE_SIZE = 100;
 const SYNC_BUDGET_MS = 8000; // never hold an app call longer than callTimeout
 const SYNC_PAUSE_MS = 120; // be kind to a public, volunteer-run API
+const DEFAULTS_RETRY_MS = 60 * 1000; // retry after the listener allows programs
 
-const t = (text) => host.t(text);
+// host.t and locales/<language>.json arrived in MyGo Music 0.1.8. That app
+// ignores minAppVersion, so an older one must degrade to plain English rather
+// than crash the first time a page or an account is asked for.
+const t = (text) => (typeof host.t === "function" ? host.t(text) : text);
 
 let catalog = null; // { list, byID: Map }
 let catalogAt = 0;
@@ -49,6 +53,8 @@ let catalogError = "";
 
 let syncRunning = false;
 let lastSyncAt = 0;
+let defaultsDone = false;
+let defaultsAt = 0;
 
 // ---------------------------------------------------------------------------
 // Settings and small helpers
@@ -249,6 +255,33 @@ async function readIndex() {
   const rows = JSON.parse(text);
   if (!Array.isArray(rows)) throw new Error("read-index did not answer a list");
   return rows;
+}
+
+// A published install arrives without settings.json: the app's installer only
+// copies files, and music.Setting has no default field. Fill the missing keys
+// through the helper's `defaults` mode on the first call that can start a
+// program. It never replaces a value the listener set. The app reads
+// settings.json when it loads the plugin, so the boxes show these values from
+// the next start; blank boxes already behave as defaults through
+// DEFAULT_SETTINGS, so nothing depends on that reload.
+async function ensureDefaults() {
+  if (defaultsDone || Date.now() - defaultsAt < DEFAULTS_RETRY_MS) return;
+  defaultsAt = Date.now();
+  try {
+    const p = host.spawn(helperPath(), ["defaults", host.dataDir, libraryPath()]);
+    await withTimeout(p.readLine(), 5000, null);
+    const code = await withTimeout(p.wait(), 5000, -1);
+    if (code !== 0) {
+      console.warn("defaults:", p.errorOutput() || `read-index exited ${code}`);
+      return;
+    }
+    defaultsDone = true;
+  } catch (e) {
+    // Programs may not be allowed yet, or the helper may be missing. Neither
+    // stops the plugin: index.js falls back to the same defaults in memory.
+    // Try again later, so allowing programs in Settings takes effect.
+    console.warn("defaults:", String((e && e.message) || e));
+  }
 }
 
 async function ensureCatalog() {
@@ -728,6 +761,7 @@ export async function setSetting({ key, value }) {
 // and the active source's startup), so it starts the .lrc sync. It answers an
 // account, not null, so the app doesn't offer a Sign In button.
 export async function account() {
+  await ensureDefaults();
   syncOnce();
   return { id: "local", name: t("Your Library"), imageUrl: "" };
 }
@@ -735,6 +769,7 @@ export async function account() {
 // played is asked even when this plugin isn't the track's source, so it keeps
 // filling in .lrc files while the listener plays from built-in Local Files.
 export function played() {
+  ensureDefaults();
   syncOnce();
 }
 

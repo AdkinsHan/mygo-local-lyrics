@@ -134,10 +134,10 @@ func TestLyricsPluginInApp(t *testing.T) {
 			t.Errorf("doesn't export %s", name)
 		}
 	}
-	if p.Info().ID != "lrclib-lyrics" || p.Info().Version != "1.1.0" {
+	if p.Info().ID != "lrclib-lyrics" || p.Info().Version != "1.1.1" {
 		t.Errorf("info = %+v", p.Info())
 	}
-	if p.manifest.MinAppVersion != "0.1.7" {
+	if p.manifest.MinAppVersion != "0.1.8" {
 		t.Errorf("minAppVersion = %q", p.manifest.MinAppVersion)
 	}
 	if got := p.Permissions().Network; len(got) != 1 || got[0] != "lrclib.net" {
@@ -378,8 +378,9 @@ func TestLyricsPluginDefaultsInApp(t *testing.T) {
 	if dir == "" {
 		t.Skip("LYRICS_PLUGIN_DIR isn't set")
 	}
-	// The installer writes these before the app starts. Check that none of
-	// the manifest's settings is left blank by that step.
+	// The installer writes these before a local install; account() writes
+	// them for a published one. Check that none of the manifest's settings is
+	// left blank by either step.
 	info := LoadedManifestForTest(t, dir)
 	data := t.TempDir()
 	helper := filepath.Join(dir, "bin", "read-index-"+runtime.GOOS+"-"+runtime.GOARCH)
@@ -418,6 +419,54 @@ func TestLyricsPluginDefaultsInApp(t *testing.T) {
 		if _, ok := settings[removed]; ok {
 			t.Errorf("removed override %s is still in the defaults", removed)
 		}
+	}
+}
+
+// TestLyricsPluginDefaultsAtRuntime checks the published-install path: a
+// plugin loaded with no settings.json fills its own defaults on account(),
+// through the same helper the app grants, without overwriting a listener's
+// edits.
+func TestLyricsPluginDefaultsAtRuntime(t *testing.T) {
+	dir := os.Getenv("LYRICS_PLUGIN_DIR")
+	if dir == "" {
+		t.Skip("LYRICS_PLUGIN_DIR isn't set")
+	}
+	info := LoadedManifestForTest(t, dir)
+	data := t.TempDir()
+	p, err := Load(dir, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	if err := p.Grant(true); err != nil {
+		t.Fatal(err)
+	}
+	// A listener's own value has to survive the helper.
+	if err := p.SetSetting("endpoint", "https://mine.example"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Account(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(data, "lrclib-lyrics", "settings.json"))
+	if err != nil {
+		t.Fatalf("account() didn't write default settings: %v", err)
+	}
+	var settings map[string]string
+	if err := json.Unmarshal(b, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["endpoint"] != "https://mine.example" {
+		t.Errorf("listener's endpoint was overwritten: %q", settings["endpoint"])
+	}
+	for _, st := range info.Settings {
+		if st.Key != "library" && settings[st.Key] == "" {
+			t.Errorf("%s has no default value", st.Key)
+		}
+	}
+	if !strings.HasSuffix(settings["library"], "local/index.json") ||
+		strings.Contains(settings["library"], "..") {
+		t.Errorf("library default isn't a clean absolute path: %q", settings["library"])
 	}
 }
 

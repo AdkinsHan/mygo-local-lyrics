@@ -2,6 +2,7 @@
 bin/
 dist/
 .dev/
+.openidea/
 node_modules/
 
 # Local noise
