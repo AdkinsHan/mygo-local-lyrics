@@ -1,0 +1,56 @@
+{
+  "id": "lrclib-lyrics",
+  "name": "LRCLib Lyrics",
+  "version": "1.1.0",
+  "minAppVersion": "0.1.7",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": ["lrclib.net"],
+    "process": ["bin/read-index-*"]
+  },
+  "settings": [
+    {
+      "key": "library",
+      "label": "Local library index",
+      "help": "Path to MyGo Music's local/index.json. The default is the one beside this plugin's data folder.",
+      "link": "https://lrclib.net/"
+    },
+    {
+      "key": "endpoint",
+      "label": "LRCLib endpoint",
+      "help": "A LRCLib-compatible server. Default: https://lrclib.net. Its host must be in the plugin's network permission.",
+      "link": "https://lrclib.net/"
+    },
+    {
+      "key": "cacheHours",
+      "label": "Cache lifetime (hours)",
+      "help": "How long a found lyric is kept before LRCLib is asked again. Default: 168 (one week). Set 0 to turn caching off."
+    },
+    {
+      "key": "timeoutMs",
+      "label": "Request timeout (ms)",
+      "help": "How long to wait for LRCLib per request. Default: 8000."
+    },
+    {
+      "key": "writeLrc",
+      "label": "Write .lrc beside local songs",
+      "help": "Default: true. Writes found lyrics beside your audio files, so they show while playing from Local Files too. Existing .lrc files are never overwritten. Set false to stop."
+    },
+    {
+      "key": "syncLimit",
+      "label": "Songs per background sync",
+      "help": "Default: 25. How many songs may be looked up each time the app starts or plays a song; keeps the load on the public LRCLib service small."
+    },
+    {
+      "key": "syncIntervalMinutes",
+      "label": "Background sync interval (minutes)",
+      "help": "Default: 15. Minimum minutes between two background lookups."
+    }
+  ],
+  "navigation": [
+    { "builtin": "home" },
+    { "title": "Albums", "page": "albums", "icon": "album" },
+    { "title": "Artists", "page": "artists", "icon": "artist" }
+  ]
+}

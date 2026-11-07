@@ -1,0 +1,437 @@
+package plugin
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"os/exec"
+	"strings"
+	"time"
+	"sync"
+	"testing"
+
+	"mygo-music/internal/music"
+)
+
+// These tests load the LRCLib plugin through MyGo Music's real JavaScript
+// runtime, with the real host, a real helper program and a local stand-in for
+// LRCLib. They check the shapes the player consumes, so they need no network.
+// LYRICS_PLUGIN_DIR points at the plugin's folder; see scripts/verify-in-app.sh.
+
+type fakeLRCLib struct {
+	mu           sync.Mutex
+	gets         []*http.Request
+	search       []*http.Request
+	ua           string
+	get          func(q map[string]string) (int, any)
+	searchResult func(q map[string]string) any
+}
+
+func (f *fakeLRCLib) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	q := map[string]string{}
+	for k, v := range r.URL.Query() {
+		if len(v) > 0 {
+			q[k] = v[0]
+		}
+	}
+	f.mu.Lock()
+	f.ua = r.Header.Get("User-Agent")
+	switch r.URL.Path {
+	case "/api/get":
+		f.gets = append(f.gets, r)
+	case "/api/search":
+		f.search = append(f.search, r)
+	}
+	f.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Path == "/api/get" && f.get != nil {
+		status, body := f.get(q)
+		if status != 0 {
+			w.WriteHeader(status)
+			if body == nil {
+				return
+			}
+		}
+		_ = json.NewEncoder(w).Encode(body)
+		return
+	}
+	if r.URL.Path == "/api/search" {
+		_ = json.NewEncoder(w).Encode(f.searchResult(q))
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
+}
+
+func quoteForTest(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func trackIDForTest(path string) string {
+	sum := sha256.Sum256([]byte("track\x00" + path))
+	return hex.EncodeToString(sum[:8])
+}
+
+// startPlugin makes a plugin over a one-song local library, with the helper
+// allowed and the endpoint pointing at a fake LRCLib.
+func startPlugin(t *testing.T, dir string, srv *httptest.Server) (*Plugin, string, string, string) {
+	t.Helper()
+	data := t.TempDir()
+	indexPath := filepath.Join(data, "index.json")
+	path := filepath.Join(data, "Creep.mp3")
+	if err := os.WriteFile(path, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	index := `{"version":2,"tracks":[{"path":` + quoteForTest(path) +
+		`,"size":123,"title":"Creep","artist":"Radiohead","album":"Pablo Honey","duration":238000}]}`
+	if err := os.WriteFile(indexPath, []byte(index), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(dir, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	if err := p.SetSetting("library", indexPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SetSetting("endpoint", srv.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Grant(true); err != nil { // allow bin/read-index-* to start
+		t.Fatal(err)
+	}
+	return p, trackIDForTest(path), path, data
+}
+
+func TestLyricsPluginInApp(t *testing.T) {
+	dir := os.Getenv("LYRICS_PLUGIN_DIR")
+	if dir == "" {
+		t.Skip("LYRICS_PLUGIN_DIR isn't set")
+	}
+	fake := &fakeLRCLib{
+		get: func(q map[string]string) (int, any) {
+			return 200, map[string]any{
+				"trackName": "Creep", "artistName": "Radiohead", "albumName": "Pablo Honey", "duration": 239,
+				"syncedLyrics": "[00:19.16] When you were here before\n[00:24.09] Couldn't look you in the eye",
+				"plainLyrics":  "When you were here before\nCouldn't look you in the eye",
+			}
+		},
+		searchResult: func(map[string]string) any { return []any{} },
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	p, id, _, _ := startPlugin(t, dir, srv)
+
+	for _, name := range []string{"lyrics", "home", "browse", "search", "album", "artist", "stream", "setSetting", "account", "played"} {
+		if !p.Can(name) {
+			t.Errorf("doesn't export %s", name)
+		}
+	}
+	if p.Info().ID != "lrclib-lyrics" || p.Info().Version != "1.1.0" {
+		t.Errorf("info = %+v", p.Info())
+	}
+	if p.manifest.MinAppVersion != "0.1.7" {
+		t.Errorf("minAppVersion = %q", p.manifest.MinAppVersion)
+	}
+	if got := p.Permissions().Network; len(got) != 1 || got[0] != "lrclib.net" {
+		t.Errorf("network permission = %v", got)
+	}
+	if got := p.Permissions().Process; len(got) != 1 || got[0] != "bin/read-index-*" {
+		t.Errorf("process permission = %v", got)
+	}
+	helper := filepath.Join(dir, "bin", "read-index-"+runtime.GOOS+"-"+runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		helper += ".exe"
+	}
+	if info, err := os.Stat(helper); err != nil || info.Mode()&0o111 == 0 {
+		t.Fatalf("helper %s: %v", helper, err)
+	}
+
+	home, err := p.Home()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if home == nil || len(home.Sections) != 1 || len(home.Sections[0].Tracks) != 1 {
+		t.Fatalf("home = %+v", home)
+	}
+	if tr := home.Sections[0].Tracks[0]; tr.ID != id || tr.Name != "Creep" || tr.Album.Name != "Pablo Honey" || tr.Duration != 238000 {
+		t.Errorf("track = %+v", tr)
+	}
+	res, err := p.Search("Creep", music.SearchTracks, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Tracks) != 1 || res.Tracks[0].ID != id {
+		t.Errorf("search = %+v", res)
+	}
+	s, err := p.Stream(id, "high")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(s.URL, "file://") || s.Type != "mp3" {
+		t.Errorf("stream = %+v", s)
+	}
+
+	l, err := p.Lyrics(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l == nil || !strings.Contains(l.LRC, "[00:19.16] When you were here before") {
+		t.Fatalf("lyrics = %+v", l)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.gets) != 1 {
+		t.Fatalf("expected one /api/get, got %d", len(fake.gets))
+	}
+	q := fake.gets[0].URL.Query()
+	for k, want := range map[string]string{
+		"artist_name": "Radiohead", "track_name": "Creep",
+		"album_name": "Pablo Honey", "duration": "238",
+	} {
+		if q.Get(k) != want {
+			t.Errorf("%s = %q, want %q", k, q.Get(k), want)
+		}
+	}
+	if !strings.HasPrefix(fake.ua, "LRCLibLyrics/") {
+		t.Errorf("User-Agent = %q", fake.ua)
+	}
+}
+
+func TestLyricsPluginCacheInApp(t *testing.T) {
+	dir := os.Getenv("LYRICS_PLUGIN_DIR")
+	if dir == "" {
+		t.Skip("LYRICS_PLUGIN_DIR isn't set")
+	}
+	fake := &fakeLRCLib{
+		get: func(map[string]string) (int, any) {
+			return 200, map[string]any{"syncedLyrics": "[00:01.00] Hello\n[00:04.00] World"}
+		},
+		searchResult: func(map[string]string) any { return []any{} },
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	p, id, _, _ := startPlugin(t, dir, srv)
+
+	first, err := p.Lyrics(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.Lyrics(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.LRC != second.LRC {
+		t.Errorf("cache changed the answer: %q vs %q", first.LRC, second.LRC)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.gets) != 1 {
+		t.Errorf("a cache hit made another request: %d gets", len(fake.gets))
+	}
+}
+
+func TestLyricsPluginRelaxedGetInApp(t *testing.T) {
+	dir := os.Getenv("LYRICS_PLUGIN_DIR")
+	if dir == "" {
+		t.Skip("LYRICS_PLUGIN_DIR isn't set")
+	}
+	fake := &fakeLRCLib{
+		get: func(q map[string]string) (int, any) {
+			if q["album_name"] != "" {
+				return 404, nil // a compilation album in the local index
+			}
+			return 200, map[string]any{
+				"trackName": "Creep", "artistName": "Radiohead", "duration": 238,
+				"syncedLyrics": "[00:19.16] The right words",
+			}
+		},
+		searchResult: func(map[string]string) any { return []any{} },
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	p, id, _, _ := startPlugin(t, dir, srv)
+
+	l, err := p.Lyrics(id)
+	if err != nil || !strings.Contains(l.LRC, "The right words") {
+		t.Fatalf("relaxed /api/get: %+v, %v", l, err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.gets) < 2 || fake.gets[1].URL.Query().Get("album_name") != "" {
+		t.Errorf("didn't retry without the album: %v", fake.gets)
+	}
+}
+
+func TestLyricsPluginSearchFallbackInApp(t *testing.T) {
+	dir := os.Getenv("LYRICS_PLUGIN_DIR")
+	if dir == "" {
+		t.Skip("LYRICS_PLUGIN_DIR isn't set")
+	}
+	fake := &fakeLRCLib{
+		get: func(map[string]string) (int, any) { return 404, nil },
+		searchResult: func(map[string]string) any {
+			return []any{
+				map[string]any{"trackName": "Creep (Live)", "artistName": "Someone Else", "albumName": "Live", "duration": 400, "syncedLyrics": "[00:01.00] Wrong"},
+				map[string]any{"trackName": "Creep", "artistName": "Radiohead", "albumName": "Pablo Honey", "duration": 239, "syncedLyrics": "[00:19.16] The right words"},
+			}
+		},
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	p, id, _, _ := startPlugin(t, dir, srv)
+
+	l, err := p.Lyrics(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(l.LRC, "The right words") || strings.Contains(l.LRC, "Wrong") {
+		t.Errorf("fallback picked the wrong lyric: %q", l.LRC)
+	}
+}
+
+func TestLyricsPluginPlainInApp(t *testing.T) {
+	dir := os.Getenv("LYRICS_PLUGIN_DIR")
+	if dir == "" {
+		t.Skip("LYRICS_PLUGIN_DIR isn't set")
+	}
+	fake := &fakeLRCLib{
+		get: func(map[string]string) (int, any) {
+			return 200, map[string]any{"syncedLyrics": nil, "plainLyrics": "one\ntwo\nthree"}
+		},
+		searchResult: func(map[string]string) any { return []any{} },
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	p, id, _, _ := startPlugin(t, dir, srv)
+
+	l, err := p.Lyrics(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.LRC != "" || len(l.Lines) != 3 {
+		t.Fatalf("plain lyrics = %+v", l)
+	}
+	for i, line := range l.Lines {
+		if line.End <= line.Start || line.Text == "" {
+			t.Errorf("line %d = %+v", i, line)
+		}
+	}
+}
+
+// The built-in Local Files source never asks a plugin for lyrics. The plugin
+// writes .lrc beside the audio instead, which Local Files reads itself.
+func TestLyricsPluginWritesSidecarsInApp(t *testing.T) {
+	dir := os.Getenv("LYRICS_PLUGIN_DIR")
+	if dir == "" {
+		t.Skip("LYRICS_PLUGIN_DIR isn't set")
+	}
+	fake := &fakeLRCLib{
+		get: func(map[string]string) (int, any) {
+			return 200, map[string]any{
+				"trackName": "Creep", "artistName": "Radiohead", "duration": 238,
+				"syncedLyrics": "[00:01.00] Hello\n[00:04.00] World",
+			}
+		},
+		searchResult: func(map[string]string) any { return []any{} },
+	}
+	srv := httptest.NewServer(fake)
+	defer srv.Close()
+	p, _, path, _ := startPlugin(t, dir, srv)
+	if _, err := p.Account(); err != nil {
+		t.Fatal(err)
+	}
+	sidecar := strings.TrimSuffix(path, ".mp3") + ".lrc"
+	for i := 0; i < 100; i++ {
+		if _, err := os.Stat(sidecar); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	b, err := os.ReadFile(sidecar)
+	if err != nil {
+		t.Fatalf("no .lrc beside the song: %v", err)
+	}
+	if !strings.Contains(string(b), "[00:01.00] Hello") {
+		t.Errorf("sidecar = %q", b)
+	}
+	// An existing .lrc is the listener's own, and must never be replaced.
+	if err := os.WriteFile(sidecar, []byte("[00:09.00] Mine"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p.Played(music.Track{ID: "anything", Source: "local"})
+	b, _ = os.ReadFile(sidecar)
+	if string(b) != "[00:09.00] Mine" {
+		t.Errorf("overwrote the listener's .lrc: %q", b)
+	}
+}
+
+func TestLyricsPluginDefaultsInApp(t *testing.T) {
+	dir := os.Getenv("LYRICS_PLUGIN_DIR")
+	if dir == "" {
+		t.Skip("LYRICS_PLUGIN_DIR isn't set")
+	}
+	// The installer writes these before the app starts. Check that none of
+	// the manifest's settings is left blank by that step.
+	info := LoadedManifestForTest(t, dir)
+	data := t.TempDir()
+	helper := filepath.Join(dir, "bin", "read-index-"+runtime.GOOS+"-"+runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		helper += ".exe"
+	}
+	out, err := RunHelperForTest(helper, "defaults", filepath.Join(data, "lrclib-lyrics"), filepath.Join(data, "local", "index.json"), "--force")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = out
+	b, err := os.ReadFile(filepath.Join(data, "lrclib-lyrics", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]string
+	if err := json.Unmarshal(b, &settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range info.Settings {
+		v, ok := settings[st.Key]
+		if !ok {
+			t.Errorf("%s has no default value", st.Key)
+		}
+		if st.Key != "library" && v == "" {
+			t.Errorf("%s = empty", st.Key)
+		}
+		if !strings.Contains(strings.ToLower(st.Help), "default") {
+			t.Errorf("%s's help doesn't name a default", st.Key)
+		}
+	}
+	if settings["library"] == "" || !strings.HasSuffix(settings["library"], "local/index.json") {
+		t.Errorf("library default = %q", settings["library"])
+	}
+	for _, removed := range []string{"artist", "title", "album"} {
+		if _, ok := settings[removed]; ok {
+			t.Errorf("removed override %s is still in the defaults", removed)
+		}
+	}
+}
+
+func LoadedManifestForTest(t *testing.T, dir string) Manifest {
+	t.Helper()
+	p, err := Load(dir, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.Close)
+	return p.manifest
+}
+
+func RunHelperForTest(name string, args ...string) ([]byte, error) {
+	return exec.Command(name, args...).CombinedOutput()
+}
+

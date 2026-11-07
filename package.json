@@ -1,0 +1,18 @@
+{
+  "name": "mygo-lyrics-plugin",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LRCLib lyrics source plugin for MyGo Music (https://lrclib.net/)",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "node --check index.js && node --check scripts/sync-lrc.mjs",
+    "go:test": "go test ./...",
+    "build:helpers": "bash scripts/build-helpers.sh",
+    "sync:lrc": "node scripts/sync-lrc.mjs",
+    "install:local": "bash scripts/install-local.sh",
+    "verify:app": "bash scripts/verify-in-app.sh",
+    "pack": "bash scripts/pack.sh"
+  },
+  "engines": { "node": ">=20" }
+}

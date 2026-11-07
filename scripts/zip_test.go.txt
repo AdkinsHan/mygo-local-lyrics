@@ -1,0 +1,52 @@
+package plugin
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
+
+// TestLyricsPluginZip checks the zip the app downloads from a release: that it
+// installs, loads and keeps the helper executable.
+func TestLyricsPluginZip(t *testing.T) {
+	zip := os.Getenv("LYRICS_PLUGIN_ZIP")
+	if zip == "" {
+		t.Skip("LYRICS_PLUGIN_ZIP isn't set")
+	}
+	dir := t.TempDir()
+	pending, err := Open(zip, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.Manifest.ID != "lrclib-lyrics" || pending.Manifest.Version != "1.1.0" {
+		t.Errorf("manifest = %+v", pending.Manifest)
+	}
+	if err := pending.Install(dir); err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(dir, pending.Manifest.ID)
+	helper := filepath.Join(installed, "bin", "read-index-"+runtime.GOOS+"-"+runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		helper += ".exe"
+	}
+	info, err := os.Stat(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Errorf("helper isn't executable after installing the zip: %v", info.Mode())
+	}
+	if out, err := exec.Command(helper, filepath.Join(t.TempDir(), "missing.json")).CombinedOutput(); err == nil {
+		t.Errorf("helper answered success for a missing index: %s", out)
+	}
+	pl, err := Load(installed, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pl.Close)
+	if !pl.Can("lyrics") || !pl.Can("stream") || !pl.Can("search") {
+		t.Error("the installed plugin doesn't export what it needs")
+	}
+}

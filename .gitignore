@@ -1,0 +1,18 @@
+# Built and downloaded development artifacts
+bin/
+dist/
+.dev/
+node_modules/
+
+# Local noise
+.DS_Store
+*.log
+
+# The user's own media (the mp3 in this workspace is a sample, not plugin data)
+*.mp3
+*.flac
+*.m4a
+*.wav
+
+# go build output at the root
+/read-index
